@@ -181,7 +181,7 @@ def main():
             "color": "C6D8CB",
             "description": "This issue will not receive a payout",
         },
-        {"name": "Excluded", "color": "710E59", "description": "An invalid issue"},
+        {"name": "Excluded", "color": "710E59", "description": "Excluded by the judge without consulting the protocol or the senior"},
     ]
     label_names = [x["name"] for x in labels]
 
