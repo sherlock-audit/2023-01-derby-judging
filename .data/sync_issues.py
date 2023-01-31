@@ -1,9 +1,63 @@
+import datetime
 import os
 import time
-from functools import lru_cache
+from functools import lru_cache, wraps
 
-from github import Github
-from github.GithubException import UnknownObjectException, GithubException
+from github import Github, Issue, Repository
+from github.GithubException import (
+    GithubException,
+    RateLimitExceededException,
+    UnknownObjectException,
+)
+
+token = os.environ.get("GITHUB_TOKEN")
+github = Github(token)
+
+
+def github_retry_on_rate_limit(func):
+    @wraps(func)
+    def inner(*args, **kwargs):
+        global github
+        while True:
+            try:
+                return func(*args, **kwargs)
+            except RateLimitExceededException:
+                print("Rate Limit hit.")
+                rl = github.get_rate_limit()
+                time_to_sleep = int((
+                    rl.core.reset - datetime.datetime.utcnow()
+                ).total_seconds() + 1)
+                print("Sleeping for %s seconds" % time_to_sleep)
+                time.sleep(time_to_sleep)
+
+    return inner
+
+
+class IssueExtended(Issue.Issue):
+    @classmethod
+    def cast(cls, issue: Issue):
+        issue.__class__ = IssueExtended
+
+        for func in ["edit"]:
+            setattr(issue, func, github_retry_on_rate_limit(getattr(issue, func)))
+        return issue
+
+
+class RepositoryExtended(Repository.Repository):
+    @classmethod
+    def cast(cls, repo: Repository.Repository):
+        repo.__class__ = RepositoryExtended
+
+        for func in [
+            "create_issue",
+            "get_contents",
+            "get_issue",
+            "get_labels",
+            "create_label",
+        ]:
+            setattr(repo, func, github_retry_on_rate_limit(getattr(repo, func)))
+        return repo
+
 
 # Issues list. Each issue is in the format:
 # {
@@ -25,17 +79,16 @@ def process_directory(repo, path):
     repo_items = [
         x
         for x in repo.get_contents(path)
-        if x.name
-        not in [".data", ".github", "README.md", "Audit_Report.pdf"]
+        if x.name not in [".data", ".github", "README.md", "Audit_Report.pdf"]
     ]
     for item in repo_items:
         print("Reading file %s" % item.name)
-        if item.name in ["unlabeled", "low-info", "closed"]:
+        if item.name in ["low", "false"]:
             process_directory(repo, item.path)
             continue
 
         parent = None
-        closed = any(x in path for x in ["unlabeled", "low-info", "closed"])
+        closed = any(x in path for x in ["low", "false"])
         files = []
         dir_issues_ids = []
         severity = None
@@ -52,8 +105,8 @@ def process_directory(repo, path):
             files = [item]
 
         for file in files:
-            if "report" in file.name:
-                issue_id = int(file.name.replace("-report.md", ""))
+            if "best" in file.name:
+                issue_id = int(file.name.replace("-best.md", ""))
                 parent = issue_id
             else:
                 issue_id = int(file.name.replace(".md", ""))
@@ -63,6 +116,11 @@ def process_directory(repo, path):
             title = auditor + " - " + body.split("\n")[4].split("# ")[1]
             if not severity:
                 severity = body.split("\n")[2][0].upper()
+
+            # Stop the script if an issue is found multiple times in the filesystem
+            if issue_id in issues.keys():
+                raise Exception("Issue %s found multiple times." % issue_id)
+
             issues[issue_id] = {
                 "id": issue_id,
                 "parent": None,
@@ -78,7 +136,7 @@ def process_directory(repo, path):
         # Set the parent field for all duplicates in this directory
         if len(files) > 1 and parent is None:
             raise Exception(
-                "Issue %s does not have a primary file (-report.md)." % item.path
+                "Issue %s does not have a primary file (-best.md)." % item.path
             )
 
         if parent:
@@ -92,23 +150,34 @@ def process_directory(repo, path):
 @lru_cache(maxsize=1024)
 def get_github_issue(repo, issue_id):
     print("Fetching issue #%s" % issue_id)
-    return repo.get_issue(issue_id)
+    return IssueExtended.cast(repo.get_issue(issue_id))
 
 
 def main():
     global issues
+    global github
 
-    token = os.environ.get("GITHUB_TOKEN")
     repo = os.environ.get("GITHUB_REPOSITORY")
     run_number = int(os.environ.get("GITHUB_RUN_NUMBER"))
 
-    github = Github(token)
-    repo = github.get_repo(repo)
+    repo = RepositoryExtended.cast(github.get_repo(repo))
 
     process_directory(repo, "")
     # Sort them by ID so we match the order
     # in which GitHub Issues created
     issues = dict(sorted(issues.items(), key=lambda item: item[1]["id"]))
+
+    # Ensure issue IDs are sequential
+    actual_issue_ids = list(issues.keys())
+    expected_issue_ids = list(range(1, max(actual_issue_ids) + 1))
+    missing_issue_ids = [x for x in expected_issue_ids if x not in actual_issue_ids]
+    assert (
+        actual_issue_ids == expected_issue_ids
+    ), "Expected issues %s actual issues %s. Missing %s" % (
+        expected_issue_ids,
+        actual_issue_ids,
+        missing_issue_ids,
+    )
 
     labels = [
         {
@@ -181,7 +250,11 @@ def main():
             "color": "C6D8CB",
             "description": "This issue will not receive a payout",
         },
-        {"name": "Excluded", "color": "710E59", "description": "Excluded by the judge without consulting the protocol or the senior"},
+        {
+            "name": "Excluded",
+            "color": "710E59",
+            "description": "Excluded by the judge without consulting the protocol or the senior",
+        },
     ]
     label_names = [x["name"] for x in labels]
 
@@ -216,10 +289,7 @@ def main():
             elif issue["severity"] == "M":
                 issue_labels.append("Medium")
 
-        if (
-            issue["closed"]
-            and not issue["parent"]
-        ):
+        if issue["closed"] and not issue["parent"]:
             issue_labels.append("Excluded")
 
         # Try creating/updating the issue until a success path is hit
@@ -251,7 +321,7 @@ def main():
                 new_labels = issue_labels + new_labels
 
                 must_update = False
-                if existing_labels != new_labels:
+                if sorted(existing_labels) != sorted(new_labels):
                     must_update = True
                     print(
                         "\tLabels differ. Old: %s New: %s"
@@ -265,7 +335,11 @@ def main():
                         % (gh_issue.title, issue["title"])
                     )
 
-                expected_body = issue["body"] if not issue["parent"] else issue["body"] + f"\n\nDuplicate of #{issue['parent']}\n"
+                expected_body = (
+                    issue["body"]
+                    if not issue["parent"]
+                    else issue["body"] + f"\n\nDuplicate of #{issue['parent']}\n"
+                )
                 if expected_body != gh_issue.body:
                     must_update = True
                     print("\tBodies differ. See the issue edit history for the diff.")
@@ -298,11 +372,6 @@ def main():
                 # Exit the infinite loop and sleep
                 must_sleep = True
                 break
-            except GithubException as e:
-                print(e)
-                # Sleep for 5 minutes (in case secondary limits have been hit)
-                # Don't exit the inifite loop and try again
-                time.sleep(300)
 
         # Sleep between issues if any edits/creations have been made
         if must_sleep:
