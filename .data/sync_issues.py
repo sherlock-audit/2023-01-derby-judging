@@ -91,7 +91,7 @@ def process_directory(repo, path):
         dir_issues_ids = []
         severity = "false"
         if item.type == "dir":
-            closed = any(x in item.name for x in ["low", "false"])
+            closed = any(x in item.name for x in ["low", "false", "invalid"])
             # If it's a directory, we have some duplicate issues
             files = list(repo.get_contents(item.path))
             try:
@@ -137,7 +137,7 @@ def process_directory(repo, path):
                 "Issue %s does not have a primary file (-best.md)." % item.path
             )
 
-        if parent:
+        if parent and not closed:
             for issue_id in dir_issues_ids:
                 if issue_id != parent:
                     issues[parent]["has_duplicates"] = True
