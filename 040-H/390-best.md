@@ -8,7 +8,7 @@ c7e7eff
 High
 
 ## Summary
-Certain functions that route messages cross chain on the `Game` and `MainVault` contract are unprotected (anyone can call them under the required state of the vaults). The way the cross chain messaging is implemented in the XProvider makes use of Connext's `xcall()` and sets the `msg.sender` as the `delegate` and `msg.value` as `relayerFee`. 
+Certain functions that route messages cross chain on the `Game` and `MainVault` contract are unprotected (anyone can call them under the required state of the vaults). The way the cross chain messaging is implemented in the XProvider makes use of Connext's `xcall()` and sets the `msg.sender` as the `delegate` and `msg.value` as `relayerFee`.
 There are two possible attack vectors with this:
 - Either an attacker can call the function and set the msg.value to low so it won't be relayed until someone bumps the fee (Connext allows anyone to bump the fee). This however means special action must be taken to bump the fee in such a case.
 - Or the attacker can call the function  (which irreversibly changes the state of the contract) and as the delegate of the `xcall` cancel the message. This functionality is however not yet active on Connext, but the moment it is the attacker will be able to change the state of the contract on the origin chain and make the cross chain message not execute on the destination chain leaving the contracts on the two chains out of synch with possible loss of funds as a result.
